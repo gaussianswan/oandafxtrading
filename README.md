@@ -1,6 +1,8 @@
 # OANDA FX Trading
 Personal repository for testing out and implementing strategies on OANDA. This work is extendable to other types of securities that might be traded. However, I plan to use OANDA to start. Please do not take any of the materials and thoughts in here as any type of financial advice. I'm just trying to play around with code. Use any code here at your own risk!
 
+The materials in here are inspired by the course on Udemy about Algorithmic Trading. You can find it [here](https://www.udemy.com/course/algorithmic-trading-with-python-and-machine-learning/). 
+
 ## Instructions in setting up environment
 ```bash
 conda create -n fxtrading python=3.9
