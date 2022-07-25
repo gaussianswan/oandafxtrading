@@ -5,9 +5,83 @@ import tpqoa
 
 from collections import defaultdict
 
-class OANDASMALiveStrategy(tpqoa.tpqoa): 
+class OANDALiveStrategy(tpqoa.tpqoa): 
 
-    def __init__(self, instrument: str, short_period: int, long_period: int, granularity: pd.Timedelta, trade_size: int, long_short = True, config_file: str = 'oanda.cfg', timezone = 'US/Eastern'): 
+    def __init__(self, instrument: str, granularity: pd.Timedelta, trade_size: int, conf_file: str = 'oanda.cfg', timezone = 'US/Eastern'):
+        super().__init__(conf_file)
+
+        self._instrument = instrument
+        self._granularity = granularity
+        self._trade_size = trade_size
+        self._conf_file = conf_file
+        self._timezone = timezone
+
+        self._historical_data = pd.DataFrame()
+        self._historical_ohlc = pd.DataFrame()
+        self._net_positions = defaultdict(float)
+
+        self._num_ticks = 0
+        self._current_state = 0
+        self._most_recent_bar = None
+
+    def get_historical_data(self): 
+        return self._historical_data
+
+    def get_historical_ohlc(self): 
+        return self._historical_ohlc
+
+    def update_historical_data(self, df: pd.DataFrame): 
+        self._historical_data = pd.concat([self._historical_data, df])
+
+    def update_historical_ohlc(self): 
+        self._historical_ohlc = self.create_ohlc(self._historical_data, frequency=self._granularity)
+        self._most_recent_bar = self._historical_ohlc.iloc[-1]
+
+    def update_net_positions(self): 
+        positions = self.get_positions()
+        if len(positions) != 0:  
+            for position in positions: 
+                instrument = position['instrument']
+                long_units = float(position['long']['units'])
+                short_units = float(position['short']['units'])
+                net_units = long_units - short_units
+                self._net_positions[instrument] = net_units
+
+    def get_net_positions(self): 
+        return self._net_positions
+
+    def close_out(self) -> None: 
+        """Closes out any positions that we have live
+
+        Returns:
+            _type_: _description_
+        """
+        self.update_net_positions()
+        self.create_order(instrument=self._instrument, units = -self._net_positions[self._instrument])
+
+        print("All positions closed out!")
+
+        self._num_ticks = 0
+        self._current_state = 0
+    
+    @staticmethod 
+    def create_ohlc(df: pd.DataFrame, frequency: str, col: str = 'Mid'): 
+
+        resampled = df.resample(rule = frequency)
+
+        o = resampled.first()
+        h = resampled.max()
+        l = resampled.min()
+        c = resampled.last()
+
+        df = pd.concat([o[col], h[col], l[col], c[col]], axis = 1)
+        df.columns = ['Open', 'High', 'Low', 'Close']
+        df.fillna(method = 'ffill', inplace=True)
+        return df
+
+class OANDASMALiveStrategy(OANDALiveStrategy): 
+
+    def __init__(self, instrument: str, short_period: int, long_period: int, granularity: pd.Timedelta, trade_size: int, long_short = True, conf_file: str = 'oanda.cfg', timezone = 'US/Eastern'): 
         """Constructor for the OANDA Simple Moving Average Strategy
 
         Args:
@@ -19,27 +93,14 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
             long_short (bool, optional): _description_. Defaults to True.
             config_file (str, optional): _description_. Defaults to 'oanda.cfg'.
         """
-        super().__init__(config_file)
+        super().__init__(instrument=instrument, granularity=granularity, trade_size=trade_size, conf_file=conf_file, timezone=timezone)
 
         assert short_period < long_period, "You can't create a strategy that has a short period longer than your long period."
-        self._instrument = instrument
         self._short_period = short_period
         self._long_period = long_period
-        self._granularity = granularity
-        self._config_file = config_file
         self._long_short = long_short
-        self._historical_data = pd.DataFrame()
-        self._historical_ohlc = pd.DataFrame()
-        self._trade_size = trade_size
         self._short_period_col_name = f"SMA_{short_period}"
         self._long_period_col_name = f"SMA_{long_period}"
-        self._first_trade_done = False
-        self._net_positions = defaultdict(float)
-        self._timezone = timezone
-
-        self._num_ticks = 0
-        self._current_state = 0
-        self._most_recent_bar = None
 
     def on_success(self, time, bid, ask): 
 
@@ -90,19 +151,6 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
         self._current_state = 0
         self.stream_data(instrument=self._instrument, **kwargs)
 
-    def get_historical_data(self): 
-        return self._historical_data
-
-    def get_historical_ohlc(self): 
-        return self._historical_ohlc
-
-    def update_historical_data(self, df: pd.DataFrame): 
-        self._historical_data = pd.concat([self._historical_data, df])
-
-    def update_historical_ohlc(self): 
-        self._historical_ohlc = self.create_ohlc(self._historical_data, frequency=self._granularity)
-        self._most_recent_bar = self._historical_ohlc.iloc[-1]
-
     def update_signal(self): 
         self._historical_ohlc[self._long_period_col_name] = self._historical_ohlc['Close'].rolling(self._long_period).mean()
         self._historical_ohlc[self._short_period_col_name] = self._historical_ohlc['Close'].rolling(self._short_period).mean()
@@ -125,48 +173,7 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
 
                 self._current_state = -1
 
-
-    def update_net_positions(self): 
-        positions = self.get_positions()
-        if len(positions) != 0:  
-            for position in positions: 
-                instrument = position['instrument']
-                long_units = float(position['long']['units'])
-                short_units = float(position['short']['units'])
-                net_units = long_units - short_units
-                self._net_positions[instrument] = net_units
-
-    def get_net_positions(self): 
-        return self._net_positions
-
-    def close_out(self) -> None: 
-        """Closes out any positions that we have live
-
-        Returns:
-            _type_: _description_
-        """
-        self.update_net_positions()
-        self.create_order(instrument=self._instrument, units = -self._net_positions[self._instrument])
-
-        print("All positions closed out!")
-
-        self._num_ticks = 0
-        self._current_state = 0
-
-    @staticmethod 
-    def create_ohlc(df: pd.DataFrame, frequency: str, col: str = 'Mid'): 
-
-        resampled = df.resample(rule = frequency)
-
-        o = resampled.first()
-        h = resampled.max()
-        l = resampled.min()
-        c = resampled.last()
-
-        df = pd.concat([o[col], h[col], l[col], c[col]], axis = 1)
-        df.columns = ['Open', 'High', 'Low', 'Close']
-        df.fillna(method = 'ffill', inplace=True)
-        return df
+    
         
     def __repr__(self) -> str: 
 
