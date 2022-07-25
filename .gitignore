@@ -7,7 +7,7 @@ archive
 *.so
 *.cfg
 *.txt
-
+*.csv
 # Distribution / packaging
 .Python
 build/
@@ -28,6 +28,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+test_data
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
