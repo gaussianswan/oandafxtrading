@@ -150,6 +150,7 @@ class OANDASMALiveStrategy(OANDALiveStrategy):
         self._num_ticks = 0
         self._current_state = 0
         self.stream_data(instrument=self._instrument, **kwargs)
+        self.close_out()
 
     def update_signal(self): 
         self._historical_ohlc[self._long_period_col_name] = self._historical_ohlc['Close'].rolling(self._long_period).mean()
