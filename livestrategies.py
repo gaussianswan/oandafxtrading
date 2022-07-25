@@ -1,11 +1,21 @@
-from sqlite3 import Date
-import numpy as np 
-import pandas as pd 
+import pandas as pd
+from pytz import timezone 
 import tpqoa
 
 from collections import defaultdict
+from abc import ABC, abstractmethod
+from oandatrade import OANDATrade
 
-class OANDALiveStrategy(tpqoa.tpqoa): 
+class OANDALiveStrategy(tpqoa.tpqoa):
+    """Abstract Base class for OANDA Live strategies using The Python Quants API as a parent class
+
+    Methods that have to be implemented:
+    * on_success - what do we need to do on each tick (heartbeat)
+    * run - how do we run the strategy
+    * update_signals - how do we update the signals of the strategy
+    * execute_on_signal - taking signals and executing trades based on that
+    
+    """ 
 
     def __init__(self, instrument: str, granularity: pd.Timedelta, trade_size: int, conf_file: str = 'oanda.cfg', timezone = 'US/Eastern'):
         super().__init__(conf_file)
@@ -23,6 +33,23 @@ class OANDALiveStrategy(tpqoa.tpqoa):
         self._num_ticks = 0
         self._current_state = 0
         self._most_recent_bar = None
+        self._trades = list()
+
+    @abstractmethod
+    def on_success(self, time, bid, ask):
+        raise NotImplementedError
+
+    @abstractmethod
+    def run(self): 
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_signals(self): 
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_on_signal(self): 
+        raise NotImplementedError
 
     def get_historical_data(self): 
         return self._historical_data
@@ -80,6 +107,18 @@ class OANDALiveStrategy(tpqoa.tpqoa):
         return df
 
 class OANDASMALiveStrategy(OANDALiveStrategy): 
+    """Simple Moving Average Strategy on OANDA
+
+    A simple moving average implementation using live trading data. We listen to incoming bid and ask 
+    prices and construct the simple moving averages of period equal to short period and long period. If the 
+    short period SMA is above the long period SMA, then we want to go long. If the opposite is true, we go short. 
+
+    In this strategy we calculate indicators based on the closing mid prices in each period. The execution mode here is complete 
+    market orders with no stop losses or take profit orders. 
+
+    Args:
+        OANDALiveStrategy (_type_): _description_
+    """
 
     def __init__(self, instrument: str, short_period: int, long_period: int, granularity: pd.Timedelta, trade_size: int, long_short = True, conf_file: str = 'oanda.cfg', timezone = 'US/Eastern'): 
         """Constructor for the OANDA Simple Moving Average Strategy
@@ -102,7 +141,7 @@ class OANDASMALiveStrategy(OANDALiveStrategy):
         self._short_period_col_name = f"SMA_{short_period}"
         self._long_period_col_name = f"SMA_{long_period}"
 
-    def on_success(self, time, bid, ask): 
+    def on_success(self, time, bid, ask) -> None: 
 
         # On each message, we are going to do the following
         # 1. Update our dataset with the most recent tick information (bid and ask) 
@@ -146,36 +185,37 @@ class OANDASMALiveStrategy(OANDALiveStrategy):
             self.update_historical_ohlc()
 
 
-    def run(self, **kwargs): 
+    def run(self, **kwargs) -> None: 
         self._num_ticks = 0
         self._current_state = 0
+        self._trades = []
         self.stream_data(instrument=self._instrument, **kwargs)
         self.close_out()
 
-    def update_signal(self): 
+    def update_signal(self) -> None: 
         self._historical_ohlc[self._long_period_col_name] = self._historical_ohlc['Close'].rolling(self._long_period).mean()
         self._historical_ohlc[self._short_period_col_name] = self._historical_ohlc['Close'].rolling(self._short_period).mean()
 
-    def execute_on_signal(self, order_size: int): 
+    def execute_on_signal(self, order_size: int) -> None: 
         current_long_sma = self._historical_ohlc[self._long_period_col_name].iloc[-1]
         current_short_sma = self._historical_ohlc[self._short_period_col_name].iloc[-1]
 
         if current_short_sma > current_long_sma: # buy signal
             if self._current_state in [-1, 0]: 
-                order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
+                order = self.create_order(instrument=self._instrument, units = order_size, ret=True, suppress=True)
                 print("Going long {} at a price of {}".format(self._instrument, order['price'])) 
-
+                trade = OANDATrade(order, timezone = self._timezone)
+                self._trades.append(trade)
                 self._current_state = 1
 
         elif current_short_sma < current_long_sma: 
             if self._current_state in [0, 1]: 
-                order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
+                order = self.create_order(instrument=self._instrument, units = order_size, ret=True, suppress=True)
                 print("Going short {} at a price of {}".format(self._instrument, order['price']))
-
+                trade = OANDATrade(order, timezone = self._timezone)
+                self._trades.append(trade)
                 self._current_state = -1
 
-    
-        
     def __repr__(self) -> str: 
 
         return f"OANDASMALiveStrategy(instrument = '{self._instrument}', short_period = {self._short_period}, long_period = {self._long_period}, granularity = '{self._granularity}', long_short = {self._long_short}, config_file = '{self._config_file}')"
@@ -193,6 +233,18 @@ class OANDASMALiveStrategy(OANDALiveStrategy):
         """.format(self._instrument, self._short_period, self._long_period, self._granularity, self._long_short, self._config_file)
 
         return description
+
+class OANDAEMALiveStrategy(OANDALiveStrategy): 
+
+    def __init__(self, instrument: str, granularity: pd.Timedelta, trade_size: int, short_hl: int, long_hl: int, conf_file: str = 'oanda.cfg', timezone='US/Eastern'):
+        super().__init__(instrument, granularity, trade_size, conf_file, timezone)
+
+        self._short_hl = short_hl
+        self._long_hl = long_hl
+
+    def on_success(self, time, bid, ask):
+        return super().on_success(time, bid, ask)
+
 
 if __name__ == '__main__': 
     strat_params = {
