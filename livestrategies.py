@@ -1,3 +1,4 @@
+from sqlite3 import Date
 import numpy as np 
 import pandas as pd 
 import tpqoa
@@ -6,7 +7,7 @@ from collections import defaultdict
 
 class OANDASMALiveStrategy(tpqoa.tpqoa): 
 
-    def __init__(self, instrument: str, short_period: int, long_period: int, granularity: str, trade_size: int, long_short = True, config_file: str = 'oanda.cfg'): 
+    def __init__(self, instrument: str, short_period: int, long_period: int, granularity: pd.Timedelta, trade_size: int, long_short = True, config_file: str = 'oanda.cfg', timezone = 'US/Eastern'): 
         """Constructor for the OANDA Simple Moving Average Strategy
 
         Args:
@@ -34,9 +35,11 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
         self._long_period_col_name = f"SMA_{long_period}"
         self._first_trade_done = False
         self._net_positions = defaultdict(float)
+        self._timezone = timezone
 
         self._num_ticks = 0
         self._current_state = 0
+        self._most_recent_bar = None
 
     def on_success(self, time, bid, ask): 
 
@@ -52,14 +55,13 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
             
         bid_ask_spread = (ask - bid)
         mid = bid + (bid_ask_spread/2)
+        tick_timestamp = pd.Timestamp(time, tz = self._timezone)
+
         df = pd.DataFrame([[time, bid, ask, mid, bid_ask_spread]], columns = ['Time', 'Bid', 'Ask', 'Mid', 'Spread'])
         df.set_index('Time', inplace = True)
         df.index = pd.to_datetime(df.index)
         
-        self._historical_data = pd.concat([self._historical_data, df])
-        self._historical_ohlc = self.create_ohlc(self._historical_data, frequency=self._granularity)
-
-        # Updating the net positions state of the strategy
+        self.update_historical_data(df)
         self.update_net_positions()
 
         # We have to make sure that we are always net long or short
@@ -68,39 +70,61 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
         else: 
             order_size = 2 * self._trade_size
 
-        # Doing logic to see if we should make a trade
-        if self._historical_ohlc.shape[0] > self._long_period:
-            self._historical_ohlc[self._long_period_col_name] = self._historical_ohlc['Close'].rolling(self._long_period).mean()
-            self._historical_ohlc[self._short_period_col_name] = self._historical_ohlc['Close'].rolling(self._short_period).mean()
+        # If a sufficient amount of time has passed since last tick and the last bar we saw
+        # we update the historical ohlc, update our signals, and then see if there is a trade to be done
+        if self._most_recent_bar is not None: 
+            latest_time = self._most_recent_bar.name.tz_convert(self._timezone)
+            if tick_timestamp > latest_time + self._granularity: 
+                self.update_historical_ohlc()
+                if self._historical_ohlc.shape[0] > self._long_period:
+                    self.update_signal()
+                    self.execute_on_signal(order_size=order_size)
+        else: 
 
-            current_long_sma = self._historical_ohlc[self._long_period_col_name].iloc[-1]
-            current_short_sma = self._historical_ohlc[self._short_period_col_name].iloc[-1]
+            # We have to update the OHLC at least once at the start
+            self.update_historical_ohlc()
 
-            if current_short_sma > current_long_sma: # buy signal
-                if self._current_state in [-1, 0]: 
-                    order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
-                    print("Going long {} at a price of {}".format(self._instrument, order['price'])) 
-
-                    self._current_state = 1
-
-            elif current_short_sma < current_long_sma: 
-                if self._current_state in [0, 1]: 
-                    order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
-                    print("Going short {} at a price of {}".format(self._instrument, order['price']))
-
-                    self._current_state = -1
 
     def run(self, **kwargs): 
         self._num_ticks = 0
         self._current_state = 0
         self.stream_data(instrument=self._instrument, **kwargs)
-        self.close_out()
 
     def get_historical_data(self): 
         return self._historical_data
 
     def get_historical_ohlc(self): 
         return self._historical_ohlc
+
+    def update_historical_data(self, df: pd.DataFrame): 
+        self._historical_data = pd.concat([self._historical_data, df])
+
+    def update_historical_ohlc(self): 
+        self._historical_ohlc = self.create_ohlc(self._historical_data, frequency=self._granularity)
+        self._most_recent_bar = self._historical_ohlc.iloc[-1]
+
+    def update_signal(self): 
+        self._historical_ohlc[self._long_period_col_name] = self._historical_ohlc['Close'].rolling(self._long_period).mean()
+        self._historical_ohlc[self._short_period_col_name] = self._historical_ohlc['Close'].rolling(self._short_period).mean()
+
+    def execute_on_signal(self, order_size: int): 
+        current_long_sma = self._historical_ohlc[self._long_period_col_name].iloc[-1]
+        current_short_sma = self._historical_ohlc[self._short_period_col_name].iloc[-1]
+
+        if current_short_sma > current_long_sma: # buy signal
+            if self._current_state in [-1, 0]: 
+                order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
+                print("Going long {} at a price of {}".format(self._instrument, order['price'])) 
+
+                self._current_state = 1
+
+        elif current_short_sma < current_long_sma: 
+            if self._current_state in [0, 1]: 
+                order = self.create_order(instrument=self._instrument, units = order_size, ret=True)
+                print("Going short {} at a price of {}".format(self._instrument, order['price']))
+
+                self._current_state = -1
+
 
     def update_net_positions(self): 
         positions = self.get_positions()
@@ -122,7 +146,7 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
             _type_: _description_
         """
         self.update_net_positions()
-        self.create_order(instrument=self._instrument, units = self._net_positions[self._instrument])
+        self.create_order(instrument=self._instrument, units = -self._net_positions[self._instrument])
 
         print("All positions closed out!")
 
@@ -132,7 +156,7 @@ class OANDASMALiveStrategy(tpqoa.tpqoa):
     @staticmethod 
     def create_ohlc(df: pd.DataFrame, frequency: str, col: str = 'Mid'): 
 
-        resampled = df.resample(frequency)
+        resampled = df.resample(rule = frequency)
 
         o = resampled.first()
         h = resampled.max()
@@ -167,7 +191,7 @@ if __name__ == '__main__':
     'instrument': 'EUR_USD', 
     'short_period': 20, 
     'long_period': 50, 
-    'granularity': '1S', 
+    'granularity': pd.Timedelta(seconds = 5), 
     'trade_size': 1000
     }
 
