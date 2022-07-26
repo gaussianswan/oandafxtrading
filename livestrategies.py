@@ -215,7 +215,7 @@ class OANDASMALiveStrategy(OANDALiveStrategy):
 
         elif current_short_sma < current_long_sma:
             if self._current_state in [0, 1]:
-                order = self.create_order(instrument=self._instrument, units = order_size, ret=True, suppress=True)
+                order = self.create_order(instrument=self._instrument, units = -order_size, ret=True, suppress=True)
                 print("Going short {} at a price of {}".format(self._instrument, order['price']))
                 trade = OANDATrade(order, timezone = self._timezone)
                 self._trades.append(trade)
